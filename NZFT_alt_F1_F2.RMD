@@ -1,0 +1,725 @@
+---
+title: "NZFT Alternatives population projections"
+author: "T. McMurdo Hamilton"
+date: "05/09/2019"
+output: html_document
+---
+```{R}
+
+library(popbio)
+library(mc2d) # Load betaPERT distribution to describe uncertain parameters
+library(sjmisc)
+library(tidyr)
+library(plyr)
+#library(reshape2) 
+library(dplyr)
+library(ggplot2)
+library(lme4)
+#library(Hmisc)
+#library(DHARMa)
+library(MuMIn)
+library(lattice)
+library(sjPlot)
+library(plotrix)
+library(truncnorm)
+#library(gridExtra)
+```
+
+Load the functions and the expert elicitation data. 
+
+The elicitation data is filtered so we just use the round two results. A mean is taken of all the experts' inputs, excluding NA's. 
+
+A function is created that uses the mean low, best, high elicited values for each parameter to create a beta-pert distribution and pull a random value from it.
+
+
+```{r}
+
+ 
+#######################################################################################
+## Function to translate mean and sd of survival into parameters of a beta distribution
+
+
+beta.params <- function(x_bar, sd.x){
+  u <- x_bar*(1-x_bar)/sd.x^2-1
+  alpha <- x_bar*u
+  beta <- (1-x_bar)*u
+  return(list(alpha = alpha, beta = beta))
+}
+
+#####################################################################################
+## Load expert elicitation data
+
+
+## excluding expert ten for colonisation round:
+biol_elicit_raw<-read.csv("C:\\Users\\thmcm\\Documents\\PhD - seabird conservation management\\Fairy Terns and SDM\\NZFT\\DATA\\FAIRY-TERN-R\\df\\Biol_elicit_1to9.csv", header=T)
+
+biol_elicit_raw[,8]<-list(NULL) # removing an odd column
+
+## generate mean values for input into models
+
+## filter for round 2
+
+biol<-biol_elicit_raw %>%
+  filter(round=="two") %>%
+  group_by(parameter) %>%
+  summarise(low.mean = mean(low, na.rm=T),best.mean = mean(best, na.rm=T), high.mean = mean(high, na.rm=T),
+           low.sd = sd(low, na.rm=T), best.sd = sd(best, na.rm=T), high.sd = sd(high, na.rm=T))
+
+biol<-as.data.frame(biol) # data frame with all the values needed for the alternative strategies' models
+
+biol$parameter<-trimws(biol$parameter)
+
+# Function that draws the rpert value for each sim from the elicited parameter dataframe 
+
+rperty<-function(param){
+  
+  df<-biol[biol$parameter == param,]
+  rpert_out<-rpert(1,min = df[,2], mode = df[,3], max = df[,4]) # draw the rpert distribution, low, best, high
+  df_out<-data.frame(param, rpert_out) # put the result of the rpert into a df
+  return(df_out)
+
+}
+
+
+```
+
+## Field 1 
+
+Here is the first tara iti management alternative, Field 1. 
+
+```{r}
+
+# Define the number of years with predictions and the Monte Carlo setting
+
+nyears <- 50 # Number of years (projection time frame)
+nsim <- 10000 # Number of replicate populations simulated
+
+
+# Define empty arrays, vectors and initial stage-specific population sizes
+
+Ni <- c(0, 3, 14) # starting population vector
+N <- array(0, dim = c(3, nyears + 1, nsim)) # edited for three life stages
+N[,1,] <- Ni 
+
+alive <- matrix(0, nrow = nyears, ncol = nsim) 
+r <- matrix(0, nrow = nyears, ncol = nsim)
+mean.r.f1 <- lambda.f1 <- persist.f1 <- numeric()   # empty vectors for r, lambda, p(persistence > 2)
+sj.val.f1 <- si.val.f1 <- sa.val.f1 <- Fa.val.f1 <- numeric()   # empty vectors for sensitivity
+Car.val.f1<-numeric()
+
+```
+
+Next, define some of the values that were not elicited. Impact of management is assumed to stay steady. Proportion of fertile eggs being laid by females also remains constant. Clutch size was elicited in other alternatives, but not for Field 1. 
+
+Check this - temporal variation of breeding parameters used is the same as the output from the data-driven GLMMs for SQ. 
+
+Carrying capacity set as the mean value elicited for Field 1. CArrying capacity in this model is modelled as affecting breeding adults, not allowing the number of breeding adults to go above it. 
+
+```{r}
+  
+  # Define constants or non-elicited, fixed values
+
+X <- 0.47                        #'cost' of management-reduction in prob of fledging from egg, calc from GLMM outputs
+infer <-0.679                    # mean proportion of fertile eggs 
+infer.e <- 0.156                 # uncertainty expressed as SD of the mean
+c <- 1.73                        # mean clutch size (first clutch attempt)
+c.e <- 0.45                      # uncertainty expressed as standard deviation of the mean
+  
+# Define temporal varition 
+
+Sjuv.t <- 0.00                # temporal variability of juvenile survival (would be expressed as SD on logit scale)
+Simm.t <- 0.00                 # temporal variability of immature survival (would be expressed as SD on logit scale)
+Sad.t <- 0.00                  # temporal variability of immature survival (would be expressed as SD on logit scale)
+h.t <- 0.2046                  # temporal variability of hatch prob (from model m2) expressed as untransformed SD
+fl.t <- 0.2389                 # temporal variability of fledge prob (from model f3) expressed as untransformed SD
+
+
+# Define carrying capacity, if using a fixed value
+
+#Car <- 22     # highest possible value from, field 1 elicitation
+#Car <- 17      # mean 'most likely' mode value from field 1 elicitation
+
+```
+
+Run the projection:
+
+```{r} 
+
+
+    # Project population
+
+      # s is parametric uncertainty
+    
+    for (s in 1:nsim){                                          # Loop over replicate populations
+      if(s %% 100 == 0) {cat(paste("*** Simrep", s, "***\n")) } # Counter
+      
+      p_out<-lapply(biol$parameter,rperty)
+      p_out<- do.call(rbind, p_out)
+      
+      # Generate mean demographic values from elicited data
+      
+      # elicited survival parameters
+      
+      sj.sim <- as.numeric(filter(p_out, param == "sjuv.f1") %>% select(rpert_out)) # dplyr
+      si.sim <- as.numeric(filter(p_out, param == "simm.f1") %>% select(rpert_out))
+      sa.sim <- as.numeric(filter(p_out, param == "sad.f1") %>% select(rpert_out))
+      
+      # elicited breeding parameters
+      
+      h.sim <- as.numeric(filter(p_out, param == "h.f1") %>% select(rpert_out))
+      fl.sim <- as.numeric(filter(p_out, param == "fl.f1") %>% select(rpert_out))
+      K.sim <- as.numeric(filter(p_out, param == "K.f1") %>% select(rpert_out))
+      M.sim <- as.numeric(filter(p_out, param == "M.f1") %>% select(rpert_out))
+      c.sim <- rtruncnorm(1, a=0, b=2, mean=c, sd=c.e)     # not elicited for field 1
+      
+      # ELICITED carrying capacity
+      
+      car.sim <- as.numeric(filter(p_out, param=="Car.f1") %>% select(rpert_out))
+      
+      
+      # Generate annual demographic rates (subject to temporal variability)
+      
+      sj <- plogis(rnorm(nyears, qlogis(sj.sim), Sjuv.t))
+      si <- plogis(rnorm(nyears, qlogis(si.sim), Simm.t))
+      sa <- plogis(rnorm(nyears, qlogis(sa.sim), Sad.t))
+      ha <- plogis(rnorm(nyears, h.sim, h.t))
+      fla <- plogis(rnorm(nyears, fl.sim, fl.t))
+      Ka <- rnorm(nyears, K.sim, 0) # no temporal var in K
+      Ma <- rnorm(nyears, M.sim, 0) # no temporal var in M
+      ca <- rnorm(nyears, c.sim, 0) # no temporal var in clutch size
+      Car <- rnorm(nyears, car.sim, 0) # to temporal var in carrying capacity
+      
+      # Project population (include demographic stochasticity)
+      
+      for (t in 1:nyears){ # Loop over years
+        
+        Fa <- (Ka[t]*ca[t]*infer*((Ma[t]*X)+(1-Ma[t]))*(ha[t]*fla[t]))/2 # fecundity equation
+       
+        N[1,t+1,s] <- rpois(1, min(Car[t], N[3,t,s]) * sa[t] * Fa)
+        N[2,t+1,s] <- rbinom(1, (N[1,t,s]), sj[t])
+        N[3,t+1,s] <- rbinom(1, (N[2,t,s]), si[t]) + rbinom(1, (N[3,t,s]), sa[t])
+        if (sum(N[,t+1,s]) == 0) break
+        else {
+          r[t,s] <- log(sum(N[,t+1,s])) - log(sum(N[,t,s])) # calculate r for each time step in each sim
+          alive[t,s] <- t
+        } # else
+        
+        persist.f1[t]<- sum(N[3,t,]>2)  / s # persistance probability at each timestep
+        
+      } # t
+      
+      sj.val.f1[s] = sj.sim
+      si.val.f1[s] = si.sim
+      sa.val.f1[s] = sa.sim
+      Fa.val.f1[s] = Fa
+      Car.val.f1[s] = car.sim
+      
+      mean.r.f1[s] <- mean(r[min(alive[,s], na.rm = TRUE):max(alive[,s], na.rm = TRUE),s])
+      lambda.f1[s] <- exp(mean.r.f1[s])
+      
+    } # s
+
+```
+
+
+# Intrinsic growth rates and population extinction probability
+
+Calculate the mean intrinsic growth rate (plus standard deviation) of all populations, and only populations that don't go extinct. 
+
+Calculate the probability of extinction after 50 years. Important to define what we class as 'extinction' here. The population has historically gone down to 3 known pairs. Makes sense to look at the rate of populations going to zero adults females and the rate of populations going down to 2 adult females.
+
+Mean intrinsic growth rate and lambda
+
+```{r}
+
+mean(mean.r.f1) 
+sd(mean.r.f1)
+
+
+mean(lambda.f1)
+sd(lambda.f1)
+
+# store lambda
+
+write.csv(lambda.f1, "lambda_A1_car.csv")
+
+```
+
+Mean intrinsic growth rate of surviving populations
+
+```{r}
+not.extinct <- which((alive[nyears,])!=0)
+mean(mean.r.f1[not.extinct]) 
+sd(mean.r.f1[not.extinct])
+```
+   
+Persistance probability (after nyears)
+
+```{r}
+
+sum(alive[nyears,]!=0) / nsim 
+
+# store persistence
+write.csv(persist.f1, "persist_A1_car.csv")
+
+```
+
+Extinction probability (population goes to zero, probability goes to 2 adult females or less)
+
+```{r}
+
+# extinction (zero)
+
+sum(N[3,nyears,]==0) / nsim
+
+# Quasi-extinction
+
+sum(apply(N[3,,1:nsim],2,min)<3)/nsim # adults only
+sum(apply(colSums(N[-1,,1:nsim]),2,min)<3)/nsim # immatures and adults only
+
+
+```
+
+Probability that population is equal to or smaller than the initial adult population size in year 1, and probability that population is surviving, but equal to or less than the 2017 size.
+
+```{r}
+
+sum(N[3,nyears,]<=N[3,1,1]) / nsim
+
+sum((N[3,nyears,]<=14) & ( N[3,nyears,]>2)) / nsim
+```
+
+Probability that the population is persisting and is larger than the initial adult population in year 1
+
+```{r}
+
+sum((N[3,nyears,] > N[3,1,1])) / nsim
+
+summary(N[3,51,])
+
+```
+
+
+## Plots of simulated populations
+
+```{R}
+
+x<-1:nyears
+plot(x, persist.f1)
+
+# if the status quo model has also been run
+
+# plot(x, persist, type = "l", col = "dodgerblue") + lines(x, persist.f1, type="l", col="purple")
+
+```
+
+
+```{r}
+
+# prep data for plots
+
+N.mean <- apply(N,c(1,2),mean)
+N.sd <- apply(N, c(1,2), sd)
+N.lci <- apply(N,c(1,2),quantile, probs=c(.025))
+N.uci <- apply(N,c(1,2),quantile, probs=c(.975))
+N.upr <- N.mean + 1.96*N.sd                       # upper 95% confidence level (1.96 * SD)
+N.lwr <- N.mean - 1.96*N.sd                       # lower 95% confidence level
+N.25 <- apply(N,c(1,2),quantile, probs=c(.25))    # lower quartile
+N.50 <- apply(N,c(1,2),quantile, probs=c(.5))     # median quartile
+N.75 <- apply(N,c(1,2),quantile, probs=c(.75))    # upper quartile
+
+N50_a1<-N[3,50,1:nsim] # store the adult population sizes at the end of simulation
+N25_a1<-N[3,25,1:nsim] # store the adult population sizes halfway through simulation
+
+plot_results_a1 = data.frame(alt = "one", years = 1:51, N.mean=N.mean[3,], N.uci = N.uci[3,], N.lci=N.lci[3,], N.upr = N.upr[3,], N.lwr = N.lwr[3,],N.25 = N.25[3,],N.50 = N.50[3,], N.75 = N.75[3,])
+
+# #store projections
+write.csv(plot_results_a1, "proj_A1_car.csv")
+# 
+# #store final population size
+# 
+write.csv(N50_a1, "N50A1_car.csv")
+
+gg2<-ggplot(plot_results_a1, aes(x=years, y=N.mean)) + 
+ geom_ribbon(aes(x = years, ymax=N.upr, ymin=N.lwr),fill = "lightgrey", alpha=0.35) +   geom_ribbon(aes(x = years, ymax=N.75, ymin=N.25), fill = "dimgrey", alpha=0.35) + geom_line(aes(x = years, y=N.50), color="white", size = 2, alpha=0.6) + geom_line(color="black", size=1, alpha=0.6) + theme_classic(base_size = 16)+  coord_cartesian(ylim=c(0,max(N.upr+10)))  + labs(title = "Predicted mean tara iti population size", x = "Year", y = "Population size (adult females)")
+
+gg2
+gg3<-ggplot(plot_results_a1, aes(x=years, y=N.mean)) + 
+ geom_ribbon(aes(x = years, ymax=N.upr, ymin=N.lwr),fill = "lightgrey", alpha=0.35) +geom_line(color="black", size=1, alpha=0.6) + theme_classic(base_size = 16)+  coord_cartesian(ylim=c(0,max(N.upr+10)))  + labs(title = "Predicted mean tara iti population size", x = "Year", y = "Population size (adult females)")
+gg3 + geom_line(aes(years, plot_results$N.mean), color="purple", size =1) + geom_ribbon(aes(x = years, ymax=plot_results$N.upr, ymin=plot_results$N.lwr), fill = "lightgrey", alpha=0.35)
+
+
+# Plot graph with population growth rates and population size
+
+layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+par(mfrow=c(1,1))
+par(las = 1, cex = 1.1)
+plot(r[,1], type = "l", lwd = 0.5, ylab = "Annual population growth rate", xlab = "Time", ylim = range(r[which(!is.na(alive))]), col = "lightgrey")
+for (s in 2:nsim){
+  lines(r[!is.na(alive[,s]),s], lwd = 0.5, col = "lightgrey")
+}
+
+lines(apply(r, 1, mean, na.rm = TRUE), lwd = 1.5)
+legend("bottomright", lwd = c(1,1), col = c("lightgrey", "black"), legend = c("Individual", "Mean"), bty = "n")
+text(x = 0, y = 1.3, "a")
+
+a <- hist(mean.r, nclass = 25, col = "dodgerblue", main = "", xlab = "Population growth rate")
+text(x = a$mids[1], y = max(a$counts)*0.95, "b")
+box()
+
+a <- hist(mean.r[not.extinct], nclass = 25, col = "dodgerblue", main = "", xlab = "Population growth rate")
+text(x = a$mids[1], y = max(a$counts)*0.95, "c")
+box()
+
+par(mfrow=c(1,1))
+
+plot(N[1,,s], type = "l", lwd = 0.5, ylab = "Population size", xlab = "Time", ylim = c(0,100), col = "white")
+for (s in 2:nsim){
+  lines(N[3,,s], lwd = 0.5, col = "dodgerblue") # plot just the adults
+  #lines(colSums(N[,,s]), lwd = 0.5, col = "dodgerblue") # if plotting whole pop
+}
+
+
+hist(N[3,50,1:nsim], xlim=c(0,300), ylim=c(0,1000), col="dodgerblue",
+     breaks=seq(0,10000, 5), xlab="Final population size at t=50", main='')
+
+```
+
+## Simple sensitivity analysis
+
+```{r}
+
+corr_df<-data.frame(sj<-sj.val.f1, si<-si.val.f1, sa<- sa.val.f1, Fa<-Fa.val.f1, r<-mean.r.f1)
+
+cor2<-ggplot(corr_df, aes(sj, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of juvenile survival + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+cor3<-ggplot(corr_df, aes(si, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of immature survival + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+cor4<-ggplot(corr_df, aes(sa, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of adult survival + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+cor5<-ggplot(corr_df, aes(Fa, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of fecundity + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+grid.arrange(cor2, cor3, cor4, cor5, ncol=2)
+
+
+```
+
+# Field 2
+
+
+```{r}
+
+# Define the number of years with predictions and the Monte Carlo setting
+
+nyears <- 50 # Number of years (projection time frame)
+nsim <- 10000 # Number of replicate populations simulated
+
+
+# Define empty arrays, vectors and initial stage-specific population sizes
+
+Ni <- c(0, 3, 14) # starting population vector
+N <- array(0, dim = c(3, nyears + 1, nsim)) # edited for three life stages
+N[,1,] <- Ni 
+
+alive <- matrix(0, nrow = nyears, ncol = nsim) 
+r <- matrix(0, nrow = nyears, ncol = nsim)
+mean.r.f2 <- numeric()
+sj.val.f2 <- si.val.f2 <- sa.val.f2 <- Fa.val.f2 <- persist.f2<- lambda.f2<- car.val.f2<- numeric() 
+
+```
+
+
+```{r}
+
+
+
+## s is parametric uncertainty
+
+# Define constants or non-elicited, fixed values
+
+X <- 0.47                        #'cost' of management-reduction in prob of fledging from egg, calc from GLMM outputs
+infer <-0.679                    # mean proportion of fertile eggs 
+infer.e <- 0.156                 # uncertainty expressed as SD of the mean
+
+
+# Define temporal varition 
+
+Sjuv.t <- 0.01                 # temporal variability of juvenile survival (would be expressed as SD on logit scale)
+Simm.t <- 0.01                 # temporal variability of immature survival (would be expressed as SD on logit scale)
+Sad.t <- 0.01                  # temporal variability of immature survival (would be expressed as SD on logit scale)
+h.t <- 0.2046                  # temporal variability of hatch prob (from model m2) expressed as untransformed SD
+fl.t <- 0.2389                 # temporal variability of fledge prob (from model f3) expressed as untransformed SD
+
+# Define carrying capacity, if using a fixed value
+
+#Car <- 24 # highest mean value from field 2 elicitation 
+#Car <- 18 # mean most likely mean value from field 2 elicitation 
+
+```
+
+Run the projection:
+
+```{r} 
+
+# Project population
+
+for (s in 1:nsim){                                          # Loop over replicate populations
+  if(s %% 100 == 0) {cat(paste("*** Simrep", s, "***\n")) } # Counter
+  
+  p_out<-lapply(biol$parameter,rperty)
+  p_out<- do.call(rbind, p_out)
+  
+  # Generate mean demographic values from elicited data
+  
+  # elicited survival parameters
+  
+  sj.sim <- as.numeric(filter(p_out, param == "sjuv.f2") %>% select(rpert_out)) # dplyr
+  si.sim <- as.numeric(filter(p_out, param == "simm.f2") %>% select(rpert_out))
+  sa.sim <- as.numeric(filter(p_out, param == "sad.f2") %>% select(rpert_out))
+  
+  # elicited breeding parameters
+  
+  h.sim <- as.numeric(filter(p_out, param == "h.f2") %>% select(rpert_out))
+  fl.sim <- as.numeric(filter(p_out, param == "fl.f2") %>% select(rpert_out))
+  M.sim <- as.numeric(filter(p_out, param == "M.f1") %>% select(rpert_out)) # same as Field 1
+  K.sim <- as.numeric(filter(p_out, param == "K.f2") %>% select(rpert_out))
+  c.sim <- as.numeric(filter(p_out, param == "c.f2") %>% select(rpert_out))
+  
+  # ELICITED carrying capacity
+      
+  car.sim <- as.numeric(filter(p_out, param=="Car.f2") %>% select(rpert_out))
+      
+  # Generate annual demographic rates (subject to temporal variability)
+  
+  sj <- plogis(rnorm(nyears, qlogis(sj.sim), Sjuv.t))
+  si <- plogis(rnorm(nyears, qlogis(si.sim), Simm.t))
+  sa <- plogis(rnorm(nyears, qlogis(sa.sim), Sad.t))
+  ha <- plogis(rnorm(nyears, h.sim, h.t))
+  fla <- plogis(rnorm(nyears, fl.sim, fl.t))
+  Ma <- rnorm(nyears, M.sim, 0) # no temporal var in M
+  Ka <- rnorm(nyears, K.sim, 0) # no temporal var in prop of fem breeding
+  ca <- rnorm(nyears, c.sim, 0) # no temporal var in clutch size
+  Car <- rnorm(nyears, car.sim, 0) # to temporal var in carrying capacity
+  
+  # Project population (include demographic stochasticity)
+  
+   
+      # Project population (include demographic stochasticity)
+      
+      for (t in 1:nyears){ # Loop over years
+        
+        Fa <- (Ka[t]*ca[t]*infer*((Ma[t]*X)+(1-Ma[t]))*(ha[t]*fla[t]))/2 # fecundity equation
+       
+        N[1,t+1,s] <- rpois(1, min(Car[t], N[3,t,s]) * sa[t] * Fa)
+        N[2,t+1,s] <- rbinom(1, (N[1,t,s]), sj[t])
+        N[3,t+1,s] <- rbinom(1, (N[2,t,s]), si[t]) + rbinom(1, (N[3,t,s]), sa[t])
+        # if (sum(N[,t+1,s]) == 0) break
+        # else {
+      r[t,s] <- ifelse(sum(N[,t+1,s]) == 0, 0, log(sum(N[,t+1,s])) - log(sum(N[,t,s]))) # calculate r for each time step in each sim
+      alive[t,s] <- t
+        # } # else
+        
+        persist.f2[t]<- sum(N[3,t,]>2)  / s # persistance probability at each timestep
+        
+      } # t
+      
+      sj.val.f2[s] = sj.sim
+      si.val.f2[s] = si.sim
+      sa.val.f2[s] = sa.sim
+      Fa.val.f2[s] = Fa
+      mean.r.f2[s] <- mean(r[min(alive[,s], na.rm = TRUE):max(alive[,s], na.rm = TRUE),s])
+      lambda.f2[s] <- exp(mean.r.f2[s])
+      car.val.f2[s] <- car.sim
+      
+    } # s
+
+```
+
+# Intrinsic growth rates and population extinction probability
+
+Calculate the mean intrinsic growth rate (plus standard deviation) of all populations, and only populations that don't go extinct. 
+
+Calculate the probability of extinction after 50 years. Important to define what we class as 'extinction' here. The population has historically gone down to 3 known pairs. Makes sense to look at the rate of populations going to zero adults females and the rate of populations going down to 2 adult females.
+
+Mean intrinsic growth rate (and standard deviation)
+
+```{r}
+
+mean(mean.r.f2) 
+sd(mean.r.f2)
+
+mean(lambda.f2)
+sd(lambda.f2)
+
+# store lambda
+write.csv(lambda.f2, "lambdaA2_car.csv")
+
+
+```
+
+Mean intrinsic growth rate of surviving populations
+
+```{r}
+not.extinct <- which((alive[nyears,])!=0)
+mean(mean.r[not.extinct]) 
+sd(mean.r[not.extinct])
+
+```
+
+Extinction probabilities 
+
+```{r}
+
+# store persistence
+
+#write.csv(persist.f2, "persistA2_car.csv")
+
+sum(N[3,nyears,]==0) / nsim
+
+# calculation of quasi-extinction 
+
+sum(apply(N[3,,1:nsim],2,min)<3)/nsim # adults only
+
+sum(apply(colSums(N[-1,,1:nsim]),2,min)<3)/nsim # immatures and adults only
+```
+
+Probability that population is equal to or smaller than the initial adult population size in year 1, and probability that population is surviving, but equal to or less than the 2017 size.
+
+```{r}
+
+sum(N[3,nyears,]<=N[3,1,1]) / nsim
+
+sum((N[3,nyears,]<=14) & ( N[3,nyears,]>2)) / nsim
+```
+
+Probability that the population is persisting and is larger than the initial adult population in year 1
+
+```{r}
+
+sum((N[3,nyears,] > N[3,1,1])) / nsim
+
+summary(N[3,51,])
+
+```
+
+
+## Plots of simulated populations
+
+```{R}
+
+x<-1:nyears
+#plot(x, persist)
+
+# if the status quo model and F1 has also been run
+
+plot(x, persist.f2, type = "l", cex = 1.5, lwd = 2, ylim = c(0.75,1), xlab = "Years", ylab = "p (persistence)")+ lines(x, persist.f1, type="l", col="green", lwd = 2) + lines(x, persist.f2, type="l", col = "dodgerblue", lwd = 2)
+
+```
+
+
+```{r}
+
+# prep data for plots
+
+N.mean <- apply(N,c(1,2),mean)
+N.sd <- apply(N, c(1,2), sd)
+N.lci <- apply(N,c(1,2),quantile, probs=c(.025))
+N.uci <- apply(N,c(1,2),quantile, probs=c(.975))
+N.upr <- N.mean + 1.96*N.sd                       # upper 95% confidence level (1.96 * SD)
+N.lwr <- N.mean - 1.96*N.sd                       # lower 95% confidence level
+N.25 <- apply(N,c(1,2),quantile, probs=c(.25))    # lower quartile
+N.50 <- apply(N,c(1,2),quantile, probs=c(.5))     # median quartile
+N.75 <- apply(N,c(1,2),quantile, probs=c(.75))    # upper quartile
+
+N50_a2<-N[3,50,1:nsim] # store the adult population sizes at the end of simulation
+N25_a2<-N[3,25,1:nsim] # store the adult population sizes halfway through simulation
+
+plot_results_a2 = data.frame(alt = "two", years = 1:51, N.mean=N.mean[3,], N.uci = N.uci[3,], N.lci=N.lci[3,], N.upr = N.upr[3,], N.lwr = N.lwr[3,],
+                          N.25 = N.25[3,],N.50 = N.50[3,], N.75 = N.75[3,])
+
+# store final pop size and projections
+
+write.csv(N50_a2, "N50A2_car.csv")
+write.csv(plot_results_a2, "projA2_car.csv")
+
+gg2<-ggplot(plot_results_a2, aes(x=years, y=N.mean)) + 
+ geom_ribbon(aes(x = years, ymax=N.upr, ymin=N.lwr),fill = "lightgrey", alpha=0.35) +   geom_ribbon(aes(x = years, ymax=N.75, ymin=N.25), fill = "dimgrey", alpha=0.35) + geom_line(aes(x = years, y=N.50), color="white", size = 2, alpha=0.6) + geom_line(color="black", size=1, alpha=0.6) + theme_classic(base_size = 16)+  coord_cartesian(ylim=c(0,max(N.upr)))  + labs(title = "Predicted tara iti population size - Field 2", x = "Year", y = "Population size (adult females)")
+
+gg2
+
+gg.f2<-ggplot(plot_results_a2, aes(x=years, y=N.mean)) + 
+  geom_ribbon(aes(x = years, ymax=N.upr, ymin=N.lwr),fill = "lightgrey", alpha=0.35) + geom_line(color="black", size=1, alpha=0.6) + theme_classic(base_size = 16)+  coord_cartesian(ylim=c(0,250))  + labs(title = "Predicted mean tara iti population size", x = "Year", y = "Population size (adult females)")
+gg.f2
+
+# Plot graph with population growth rates and population size
+
+layout(matrix(c(1,1,2,3), 2, 2, byrow = TRUE))
+par(mfrow=c(1,1))
+par(las = 1, cex = 1.1)
+plot(r[,1], type = "l", lwd = 0.5, ylab = "Annual population growth rate", xlab = "Time", ylim = range(r[which(!is.na(alive))]), col = "lightgrey")
+
+for (s in 2:nsim){
+  lines(r[!is.na(alive[,s]),s], lwd = 0.5, col = "lightgrey")
+}
+
+lines(apply(r, 1, mean, na.rm = TRUE), lwd = 1.5)
+legend("bottomright", lwd = c(1,1), col = c("lightgrey", "black"), legend = c("Individual", "Mean"), bty = "n")
+text(x = 0, y = 1.3, "a")
+
+a <- hist(mean.r, nclass = 25, col = "dodgerblue", main = "", xlab = "Population growth rate")
+text(x = a$mids[1], y = max(a$counts)*0.95, "b")
+box()
+
+a <- hist(mean.r[not.extinct], nclass = 25, col = "dodgerblue", main = "", xlab = "Population growth rate")
+text(x = a$mids[1], y = max(a$counts)*0.95, "c")
+box()
+
+par(mfrow=c(1,1))
+
+plot(N[1,,s], type = "l", lwd = 0.5, ylab = "Population size", xlab = "Time", ylim = c(0,max(N.upr+10)), col = "white")
+for (s in 2:nsim){
+  lines(N[3,,s], lwd = 0.5, col = "dodgerblue") # plot just the adults
+  #lines(colSums(N[,,s]), lwd = 0.5, col = "dodgerblue") # if plotting whole pop
+}
+
+
+hist(N[3,50,1:nsim], xlim=c(0,300), ylim=c(0,1000), col="dodgerblue",
+     breaks=seq(0,10000, 5), xlab="Final population size at t=50", main='')
+
+lambda.density<-plot(density(lambda.sq), xlim=c(0.8, 1.2), ylim = c(0, 60), main = "",  xlab = expression(lambda), lwd = 2, cex = 2) + abline(v=1, col = "grey") + lines(density(lambda.f1), col = "green", lwd = 2) + lines(density(lambda.f2), col = "dodgerblue", lwd = 2)
+
+
+```
+
+## Simple sensitivity analysis - field 2
+
+```{r}
+
+corr_df<-data.frame(sj<-sj.val.f2, si<-si.val.f2, sa<- sa.val.f2, Fa<-Fa.val.f2, r<-mean.r.f2)
+
+cor2<-ggplot(corr_df, aes(sj, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of juvenile survival + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+cor3<-ggplot(corr_df, aes(si, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of immature survival + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+cor4<-ggplot(corr_df, aes(sa, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of adult survival + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+cor5<-ggplot(corr_df, aes(Fa, r)) + geom_point(shape = 21, size = 1.5) + labs(title = "Correlation of juvenile survival + mean population growth rate") +   theme_classic(base_size = 12) + labs(title = "Correlation of fecundity + mean population growth rate") +
+  theme_classic(base_size = 12)
+
+grid.arrange(cor2, cor3, cor4, cor5, ncol=2)
+
+
+simple.sens<-lm(r ~ sj+si+sa, data = corr_df)
+
+summary(simple.sens)
+```
+
+
+  
